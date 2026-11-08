@@ -9,6 +9,7 @@
 ## 功能
 
 - 自动查找系统已配对的 `EDIFIER` / `Fit900` 设备，不再展示整页设备列表
+- 单实例 Activity：回到桌面再点图标会复用原界面，不会多开 MainActivity，SPP 连接状态保持
 - SPP 连接：`EDF00000-EDFE-DFED-FEDF-EDFEDFEDFEDF`，失败自动回退 RFCOMM channel 1
 - 电量：同时查询 `0xD0` 和 `0xF2`，兼容整机 / 左右耳 / 电池仓三种返回
 - 降噪：查询 `0xCC`，设置 `0xC1`，自动使用耳机返回的 ANC index；按钮带约 2.2 秒防连点间隔和旋转等待动画，关机档切出时还会自动补发一次命令

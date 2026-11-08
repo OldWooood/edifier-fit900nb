@@ -135,6 +135,15 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        // singleTask: launcher taps reuse this instance instead of creating a
+        // second MainActivity with its own (disconnected) SppClient.
+        if (!connected && hasBtPermission()) refreshTargetDevice();
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         if (spp != null) spp.close();
