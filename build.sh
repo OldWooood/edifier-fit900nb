@@ -34,8 +34,8 @@ echo "==> link resources"
   --java build/gen \
   --min-sdk-version 26 \
   --target-sdk-version 36 \
-  --version-code 2 \
-  --version-name 1.0.1 \
+  --version-code 3 \
+  --version-name 1.0.2 \
   build/res.zip
 
 echo "==> compile Java"

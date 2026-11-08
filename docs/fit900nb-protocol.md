@@ -6,7 +6,7 @@
 
 ## 1. 设备与配对信息
 
-从官方 APK 的 `assets/products_release.json`（AES-CBC 加密）解出的产品配置：
+从官方 App 的产品配置中整理出的设备信息（本项目不分发官方 APK、配置或密钥）：
 
 | 项目 | 值 |
 |---|---|
@@ -295,13 +295,7 @@ payload 为空。`0xCE` 是官方 `CommandIndex.shutdown`，社区文档也把�
 | `com.edifier.lib_base.handler.CommandParserHelper` | ANC / 电量 / 版本 / D8 解析 |
 | `com.edifier.edifierconnect.util.CryptUtil` | `products_release.json` 的 AES 解密 |
 
-`products_release.json` 解密参数（仅用于研究，不随 App 分发）：
-
-```text
-AES/CBC/PKCS5Padding
-key = HiO9d5jV0Ln7VNE5M+lM=E&E^Mobt_TA
-iv  = 3-eM$+G6-UZBisv$
-```
+> 官方 App 对产品配置做了加密/混淆。本项目**不公开**相关密钥、IV 或官方配置文件，也不分发官方 APK、固件、图片、音频等专有资源。协议信息仅用于互操作性研究。
 
 ## 9. 仍需确认 / 未实现
 
