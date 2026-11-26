@@ -1,6 +1,10 @@
 package com.deatrg.fit900nb;
 
 import android.Manifest;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ArgbEvaluator;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
@@ -13,7 +17,12 @@ import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -24,9 +33,13 @@ import android.text.InputType;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.Window;
+import android.view.animation.Interpolator;
+import android.view.animation.PathInterpolator;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
@@ -40,6 +53,8 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 public final class MainActivity extends Activity {
     private static final int REQ_BT = 41;
@@ -56,18 +71,30 @@ public final class MainActivity extends Activity {
     private static final int GREEN = 0xFF43D39E;
     private static final int AMBER = 0xFFF0B35B;
     private static final int RED = 0xFFFF6B6B;
-    private static final int TRACK = 0xFF252D3B;
 
     private static final int DEFAULT_ANC_INDEX = 0x10;
     private static final long ANC_SWITCH_COOLDOWN_MS = 2200L;
     private static final long SCENE_SWITCH_COOLDOWN_MS = 1500L;
     private static final long SHUTDOWN_CONFIRM_TIMEOUT_MS = 3000L;
 
+    private static final long PRESS_ANIMATION_MS = 120L;
+    private static final long COLOR_TRANSITION_MS = 150L;
+    private static final long DISABLED_TRANSITION_MS = 120L;
+    private static final long SPINNER_IN_ANIMATION_MS = 100L;
+    private static final long SPINNER_OUT_ANIMATION_MS = 80L;
+    private static final long PANEL_IN_ANIMATION_MS = 160L;
+    private static final long PANEL_OUT_ANIMATION_MS = 120L;
+    private static final float PRESSED_SCALE = 0.98f;
+    private static final Interpolator EASE_OUT = new PathInterpolator(0.23f, 1f, 0.32f, 1f);
+
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final StringBuilder logs = new StringBuilder();
     private final SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss", Locale.US);
     private final List<ModeRow> modeRows = new ArrayList<>();
     private final List<SceneRow> sceneRows = new ArrayList<>();
+    private final Map<View, GradientDrawable> fillDrawables = new WeakHashMap<>();
+    private final Map<View, ValueAnimator> fillAnimations = new WeakHashMap<>();
+    private final Map<View, ValueAnimator> textAnimations = new WeakHashMap<>();
 
     private BluetoothAdapter adapter;
     private SppClient spp;
@@ -100,7 +127,6 @@ public final class MainActivity extends Activity {
     private TextView settingsButton;
     private TextView shutdownButton;
     private TextView batteryPill;
-    private ProgressBar batteryBar;
     private TextView ancCurrent;
     private ProgressBar ancSpinner;
     private TextView ancIndexText;
@@ -109,6 +135,7 @@ public final class MainActivity extends Activity {
     private ProgressBar sceneSpinner;
     private LinearLayout sceneList;
     private TextView infoText;
+    private ScrollView mainScroll;
     private LinearLayout debugCard;
     private TextView logView;
     private ScrollView logScroll;
@@ -153,6 +180,7 @@ public final class MainActivity extends Activity {
 
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
+        mainScroll = scroll;
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(BG);
         scroll.setFocusable(true);
@@ -229,24 +257,15 @@ public final class MainActivity extends Activity {
         batteryPill = text("—", 12, MUTED, Typeface.BOLD);
         batteryPill.setGravity(Gravity.CENTER);
         batteryPill.setPadding(dp(10), dp(6), dp(10), dp(6));
-        batteryPill.setBackground(bg(ROW, 12));
+        batteryPill.setBackground(statefulBackground(batteryPill, ROW, 12));
+        batteryPill.setContentDescription("电量未知，点击刷新");
         batteryPill.setVisibility(View.GONE);
         batteryPill.setOnClickListener(v -> queryBattery());
+        installPressFeedback(batteryPill);
         LinearLayout.LayoutParams batteryPillLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         batteryPillLp.setMargins(dp(10), 0, 0, 0);
         statusRow.addView(batteryPill, batteryPillLp);
-
-        batteryBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        batteryBar.setMax(100);
-        batteryBar.setProgress(0);
-        batteryBar.setProgressTintList(ColorStateList.valueOf(ACCENT));
-        batteryBar.setProgressBackgroundTintList(ColorStateList.valueOf(TRACK));
-        batteryBar.setVisibility(View.GONE);
-        LinearLayout.LayoutParams batteryBarLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(4));
-        batteryBarLp.topMargin = dp(12);
-        connectionCard.addView(batteryBar, batteryBarLp);
 
         connectButton = action("连接耳机", true);
         connectButton.setOnClickListener(v -> onConnectClicked());
@@ -300,8 +319,10 @@ public final class MainActivity extends Activity {
 
         ancIndexText = text("索引 0x" + hex2(ancIndex), 10, FAINT, Typeface.NORMAL);
         ancIndexText.setPadding(dp(8), dp(5), dp(8), dp(5));
-        ancIndexText.setBackground(bg(ROW, 20));
+        ancIndexText.setBackground(statefulBackground(ancIndexText, ROW, 20));
+        ancIndexText.setContentDescription("修改 ANC 索引");
         ancIndexText.setOnClickListener(v -> showAncIndexDialog());
+        installPressFeedback(ancIndexText);
         ancFooter.addView(ancIndexText);
         TextView ancHint = text("点击索引可手动覆盖", 10, FAINT, Typeface.NORMAL);
         ancHint.setPadding(dp(8), 0, 0, 0);
@@ -498,9 +519,10 @@ public final class MainActivity extends Activity {
         TextView view = text(label, 13, primary ? Color.WHITE : TEXT, Typeface.BOLD);
         view.setGravity(Gravity.CENTER);
         view.setPadding(dp(14), 0, dp(14), 0);
-        view.setBackground(bg(primary ? ACCENT : ROW, 14));
+        view.setBackground(statefulBackground(view, primary ? ACCENT : ROW, 14));
         view.setClickable(true);
         view.setFocusable(true);
+        installPressFeedback(view);
         return view;
     }
 
@@ -508,9 +530,10 @@ public final class MainActivity extends Activity {
         TextView view = text(label, 13, RED, Typeface.BOLD);
         view.setGravity(Gravity.CENTER);
         view.setPadding(dp(14), 0, dp(14), 0);
-        view.setBackground(bg(0xFF2A171B, 14));
+        view.setBackground(statefulBackground(view, 0xFF2A171B, 14));
         view.setClickable(true);
         view.setFocusable(true);
+        installPressFeedback(view);
         return view;
     }
 
@@ -526,6 +549,205 @@ public final class MainActivity extends Activity {
         drawable.setShape(GradientDrawable.OVAL);
         drawable.setColor(color);
         return drawable;
+    }
+
+    private boolean motionEnabled() {
+        return ValueAnimator.areAnimatorsEnabled();
+    }
+
+    private int withAlpha(int color, int alpha) {
+        return (alpha << 24) | (color & 0x00FFFFFF);
+    }
+
+    private Drawable statefulBackground(View view, int color, float radiusDp) {
+        GradientDrawable base = bg(color, radiusDp);
+        fillDrawables.put(view, base);
+
+        GradientDrawable pressed = bg(withAlpha(Color.WHITE, 0x18), radiusDp);
+        GradientDrawable focused = bg(Color.TRANSPARENT, radiusDp);
+        focused.setStroke(dp(2), withAlpha(Color.WHITE, 0xCC));
+        StateListDrawable overlay = new StateListDrawable();
+        overlay.addState(new int[]{android.R.attr.state_focused}, focused);
+        overlay.addState(new int[]{android.R.attr.state_pressed}, pressed);
+        overlay.addState(new int[]{}, new ColorDrawable(Color.TRANSPARENT));
+
+        LayerDrawable content = new LayerDrawable(new Drawable[]{base, overlay});
+        if (!motionEnabled()) return content;
+
+        GradientDrawable mask = bg(Color.WHITE, radiusDp);
+        return new RippleDrawable(
+                ColorStateList.valueOf(withAlpha(Color.WHITE, 0x33)), content, mask);
+    }
+
+    private void installPressFeedback(View view) {
+        view.setOnTouchListener((v, event) -> {
+            if (!v.isEnabled()) return false;
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    animateScale(v, PRESSED_SCALE);
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    animateScale(v, 1f);
+                    break;
+                default:
+                    break;
+            }
+            return false;
+        });
+    }
+
+    private void animateScale(View view, float scale) {
+        if (!motionEnabled()) {
+            view.animate().cancel();
+            view.setScaleX(1f);
+            view.setScaleY(1f);
+            return;
+        }
+        view.animate()
+                .scaleX(scale)
+                .scaleY(scale)
+                .setDuration(PRESS_ANIMATION_MS)
+                .setInterpolator(EASE_OUT)
+                .start();
+    }
+
+    private void animateAlpha(View view, float alpha) {
+        if (!motionEnabled()) {
+            view.animate().cancel();
+            view.setScaleX(1f);
+            view.setScaleY(1f);
+            view.setAlpha(alpha);
+            return;
+        }
+        view.animate()
+                .alpha(alpha)
+                .setDuration(DISABLED_TRANSITION_MS)
+                .setInterpolator(EASE_OUT)
+                .start();
+    }
+
+    private void applyFillColor(View view, int color) {
+        GradientDrawable fill = fillDrawables.get(view);
+        if (fill == null) {
+            view.setBackground(bg(color, 14));
+            return;
+        }
+        fill.setColor(color);
+        view.invalidate();
+    }
+
+    private void setFillColor(View view, int color) {
+        ValueAnimator animator = fillAnimations.remove(view);
+        if (animator != null) animator.cancel();
+        applyFillColor(view, color);
+    }
+
+    private void animateFillColor(View view, int color) {
+        GradientDrawable fill = fillDrawables.get(view);
+        Integer current = null;
+        if (fill != null && fill.getColor() != null) {
+            current = fill.getColor().getDefaultColor();
+        }
+        if (!motionEnabled() || fill == null || current == null || current == color) {
+            setFillColor(view, color);
+            return;
+        }
+
+        ValueAnimator previous = fillAnimations.remove(view);
+        if (previous != null) previous.cancel();
+
+        ValueAnimator animator = ValueAnimator.ofObject(new ArgbEvaluator(), current, color);
+        animator.setDuration(COLOR_TRANSITION_MS);
+        animator.setInterpolator(EASE_OUT);
+        animator.addUpdateListener(animation ->
+                applyFillColor(view, (Integer) animation.getAnimatedValue()));
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (fillAnimations.get(view) == animation) fillAnimations.remove(view);
+            }
+        });
+        fillAnimations.put(view, animator);
+        animator.start();
+    }
+
+    private void animateTextColor(TextView view, int color) {
+        int current = view.getCurrentTextColor();
+        if (!motionEnabled() || current == color) {
+            ValueAnimator previous = textAnimations.remove(view);
+            if (previous != null) previous.cancel();
+            view.setTextColor(color);
+            return;
+        }
+
+        ValueAnimator previous = textAnimations.remove(view);
+        if (previous != null) previous.cancel();
+
+        ValueAnimator animator = ValueAnimator.ofObject(new ArgbEvaluator(), current, color);
+        animator.setDuration(COLOR_TRANSITION_MS);
+        animator.setInterpolator(EASE_OUT);
+        animator.addUpdateListener(animation ->
+                view.setTextColor((Integer) animation.getAnimatedValue()));
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (textAnimations.get(view) == animation) textAnimations.remove(view);
+            }
+        });
+        textAnimations.put(view, animator);
+        animator.start();
+    }
+
+    private void setSpinnerVisible(ProgressBar spinner, boolean show) {
+        if (spinner == null) return;
+        spinner.animate().cancel();
+        if (!motionEnabled()) {
+            spinner.setVisibility(View.GONE);
+            spinner.setAlpha(1f);
+            return;
+        }
+
+        if (show) {
+            if (spinner.getVisibility() != View.VISIBLE) {
+                spinner.setVisibility(View.VISIBLE);
+                spinner.setAlpha(0f);
+            }
+            spinner.animate()
+                    .alpha(1f)
+                    .setDuration(SPINNER_IN_ANIMATION_MS)
+                    .setInterpolator(EASE_OUT)
+                    .start();
+        } else if (spinner.getVisibility() == View.VISIBLE) {
+            spinner.animate()
+                    .alpha(0f)
+                    .setDuration(SPINNER_OUT_ANIMATION_MS)
+                    .setInterpolator(EASE_OUT)
+                    .withEndAction(() -> {
+                        spinner.setVisibility(View.GONE);
+                        spinner.setAlpha(1f);
+                    })
+                    .start();
+        }
+    }
+
+    private void scrollToDebugCard() {
+        if (mainScroll == null || debugCard == null) return;
+        debugCard.getViewTreeObserver().addOnPreDrawListener(
+                new ViewTreeObserver.OnPreDrawListener() {
+                    @Override
+                    public boolean onPreDraw() {
+                        debugCard.getViewTreeObserver().removeOnPreDrawListener(this);
+                        if (debugCard.getVisibility() != View.VISIBLE) return true;
+                        int target = Math.max(0, debugCard.getTop() - dp(16));
+                        if (motionEnabled()) {
+                            mainScroll.smoothScrollTo(0, target);
+                        } else {
+                            mainScroll.scrollTo(0, target);
+                        }
+                        return true;
+                    }
+                });
     }
 
     private int dp(float value) {
@@ -620,7 +842,7 @@ public final class MainActivity extends Activity {
     private void setConnectAvailable(boolean available) {
         if (connectButton == null) return;
         connectButton.setClickable(available);
-        connectButton.setAlpha(available ? 1f : 0.55f);
+        animateAlpha(connectButton, available ? 1f : 0.55f);
     }
 
     private boolean isTarget(BluetoothDevice device) {
@@ -712,7 +934,7 @@ public final class MainActivity extends Activity {
         statusDot.setBackground(oval(AMBER));
         deviceText.setText(safeName(device) + " · " + safeAddress(device));
         connectButton.setText("连接中…");
-        connectButton.setAlpha(0.65f);
+        animateAlpha(connectButton, 0.65f);
         connectButton.setClickable(false);
         resetShutdownButton();
         if (shutdownButton != null) shutdownButton.setVisibility(View.GONE);
@@ -749,7 +971,7 @@ public final class MainActivity extends Activity {
             statusText.setText("已连接");
             statusDot.setBackground(oval(GREEN));
             connectButton.setText("断开连接");
-            connectButton.setAlpha(1f);
+            animateAlpha(connectButton, 1f);
             connectButton.setClickable(true);
             if (selected != null) {
                 deviceText.setText(safeName(selected) + " · " + safeAddress(selected));
@@ -770,7 +992,7 @@ public final class MainActivity extends Activity {
             statusText.setText("未连接");
             statusDot.setBackground(oval(FAINT));
             connectButton.setText("连接耳机");
-            connectButton.setAlpha(1f);
+            animateAlpha(connectButton, 1f);
             connectButton.setClickable(true);
             appendLog("SYS", message);
             setBatteryVisible(false);
@@ -791,7 +1013,37 @@ public final class MainActivity extends Activity {
     private void toggleDebugCard() {
         if (debugCard == null) return;
         boolean show = debugCard.getVisibility() != View.VISIBLE;
-        debugCard.setVisibility(show ? View.VISIBLE : View.GONE);
+        debugCard.animate().cancel();
+
+        if (!motionEnabled()) {
+            debugCard.setVisibility(show ? View.VISIBLE : View.GONE);
+            debugCard.setAlpha(1f);
+            debugCard.setTranslationY(0f);
+            if (show) scrollToDebugCard();
+        } else if (show) {
+            debugCard.setVisibility(View.VISIBLE);
+            debugCard.setAlpha(0f);
+            debugCard.setTranslationY(dp(8));
+            debugCard.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setDuration(PANEL_IN_ANIMATION_MS)
+                    .setInterpolator(EASE_OUT)
+                    .start();
+            scrollToDebugCard();
+        } else {
+            debugCard.animate()
+                    .alpha(0f)
+                    .translationY(dp(8))
+                    .setDuration(PANEL_OUT_ANIMATION_MS)
+                    .setInterpolator(EASE_OUT)
+                    .withEndAction(() -> {
+                        debugCard.setVisibility(View.GONE);
+                        debugCard.setAlpha(1f);
+                        debugCard.setTranslationY(0f);
+                    })
+                    .start();
+        }
         toast(show ? "调试面板已显示" : "调试面板已隐藏");
     }
 
@@ -838,8 +1090,8 @@ public final class MainActivity extends Activity {
             shutdownConfirmPending = true;
             final int token = ++shutdownConfirmToken;
             shutdownButton.setText("再次点击确认关机");
-            shutdownButton.setTextColor(Color.WHITE);
-            shutdownButton.setBackground(bg(0xFF5A1F2A, 14));
+            animateTextColor(shutdownButton, Color.WHITE);
+            animateFillColor(shutdownButton, 0xFF5A1F2A);
             ui.postDelayed(() -> {
                 if (token == shutdownConfirmToken && shutdownConfirmPending) {
                     resetShutdownButton();
@@ -851,7 +1103,7 @@ public final class MainActivity extends Activity {
         shutdownConfirmPending = false;
         shutdownConfirmToken++;
         shutdownButton.setEnabled(false);
-        shutdownButton.setAlpha(0.6f);
+        animateAlpha(shutdownButton, 0.6f);
         shutdownButton.setText("正在关机…");
         sendCommand(Protocol.CMD_SHUTDOWN, new byte[0]);
         appendLog("SYS", "已发送关机命令");
@@ -866,10 +1118,10 @@ public final class MainActivity extends Activity {
         shutdownConfirmPending = false;
         if (shutdownButton == null) return;
         shutdownButton.setText("关闭耳机电源");
-        shutdownButton.setTextColor(RED);
-        shutdownButton.setBackground(bg(0xFF2A171B, 14));
+        animateTextColor(shutdownButton, RED);
+        animateFillColor(shutdownButton, 0xFF2A171B);
         shutdownButton.setEnabled(true);
-        shutdownButton.setAlpha(1f);
+        animateAlpha(shutdownButton, 1f);
     }
 
     private void queryAnc() {
@@ -969,26 +1221,25 @@ public final class MainActivity extends Activity {
         charging = isCharging;
         if (batteryPill != null) {
             batteryPill.setText(batteryPercent + "%" + (isCharging ? " ⚡" : ""));
+            batteryPill.setContentDescription("电量 " + batteryPercent + "%"
+                    + (isCharging ? "，充电中" : "") + "，点击刷新");
             batteryPill.setTextColor(ACCENT);
-            batteryPill.setBackground(bg(ACCENT_DIM, 12));
+            setFillColor(batteryPill, ACCENT_DIM);
         }
-        if (batteryBar != null) batteryBar.setProgress(batteryPercent);
     }
 
     private void updateBatteryUi() {
         if (batteryPill != null) {
             batteryPill.setText(batteryPercent < 0 ? "—" : batteryPercent + "%");
+            batteryPill.setContentDescription(batteryPercent < 0
+                    ? "电量未知，点击刷新" : "电量 " + batteryPercent + "%，点击刷新");
             batteryPill.setTextColor(batteryPercent < 0 ? MUTED : ACCENT);
-            batteryPill.setBackground(bg(batteryPercent < 0 ? ROW : ACCENT_DIM, 12));
-        }
-        if (batteryBar != null) {
-            batteryBar.setProgress(batteryPercent < 0 ? 0 : batteryPercent);
+            setFillColor(batteryPill, batteryPercent < 0 ? ROW : ACCENT_DIM);
         }
     }
 
     private void setBatteryVisible(boolean visible) {
         if (batteryPill != null) batteryPill.setVisibility(visible ? View.VISIBLE : View.GONE);
-        if (batteryBar != null) batteryBar.setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 
     private void parseAnc(byte[] payload) {
@@ -1067,10 +1318,11 @@ public final class MainActivity extends Activity {
         TextView button = text(name, 12, TEXT, Typeface.BOLD);
         button.setGravity(Gravity.CENTER);
         button.setPadding(dp(9), dp(10), dp(9), dp(10));
-        button.setBackground(bg(ROW, 12));
+        button.setBackground(statefulBackground(button, ROW, 12));
         button.setClickable(true);
         button.setFocusable(true);
         button.setOnClickListener(v -> setAnc(value));
+        installPressFeedback(button);
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1083,11 +1335,12 @@ public final class MainActivity extends Activity {
         if (ancCurrent == null) return;
         ancCurrent.setText(ancValue >= 0 ? "当前：" + modeName(ancIndex, ancValue) : "未获取");
         ancIndexText.setText("索引 0x" + hex2(ancIndex));
+        ancIndexText.setContentDescription("ANC 索引 0x" + hex2(ancIndex) + "，点击修改");
 
         for (ModeRow row : modeRows) {
             boolean applied = row.value == ancValue;
-            row.button.setBackground(bg(applied ? ACCENT : ROW, 12));
-            row.button.setTextColor(applied ? Color.WHITE : TEXT);
+            animateFillColor(row.button, applied ? ACCENT : ROW);
+            animateTextColor(row.button, applied ? Color.WHITE : TEXT);
         }
         updateInfo();
     }
@@ -1134,14 +1387,12 @@ public final class MainActivity extends Activity {
     private void setModeButtonsEnabled(boolean enabled) {
         for (ModeRow row : modeRows) {
             row.button.setEnabled(enabled);
-            row.button.setAlpha(enabled ? 1f : 0.55f);
+            animateAlpha(row.button, enabled ? 1f : 0.55f);
         }
     }
 
     private void showAncSpinner(boolean show) {
-        if (ancSpinner != null) {
-            ancSpinner.setVisibility(show ? View.VISIBLE : View.GONE);
-        }
+        setSpinnerVisible(ancSpinner, show);
         if (show && ancCurrent != null) {
             ancCurrent.setText("切换中…");
         }
@@ -1163,10 +1414,11 @@ public final class MainActivity extends Activity {
         TextView button = text(name, 12, TEXT, Typeface.BOLD);
         button.setGravity(Gravity.CENTER);
         button.setPadding(dp(9), dp(10), dp(9), dp(10));
-        button.setBackground(bg(ROW, 12));
+        button.setBackground(statefulBackground(button, ROW, 12));
         button.setClickable(true);
         button.setFocusable(true);
         button.setOnClickListener(v -> setScene(mode));
+        installPressFeedback(button);
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -1180,8 +1432,8 @@ public final class MainActivity extends Activity {
         sceneCurrent.setText(sceneMode >= 0 ? "当前：" + sceneName(sceneMode) : "未获取");
         for (SceneRow row : sceneRows) {
             boolean applied = row.mode == sceneMode;
-            row.button.setBackground(bg(applied ? ACCENT : ROW, 12));
-            row.button.setTextColor(applied ? Color.WHITE : TEXT);
+            animateFillColor(row.button, applied ? ACCENT : ROW);
+            animateTextColor(row.button, applied ? Color.WHITE : TEXT);
         }
         updateInfo();
     }
@@ -1226,14 +1478,12 @@ public final class MainActivity extends Activity {
     private void setSceneButtonsEnabled(boolean enabled) {
         for (SceneRow row : sceneRows) {
             row.button.setEnabled(enabled);
-            row.button.setAlpha(enabled ? 1f : 0.55f);
+            animateAlpha(row.button, enabled ? 1f : 0.55f);
         }
     }
 
     private void showSceneSpinner(boolean show) {
-        if (sceneSpinner != null) {
-            sceneSpinner.setVisibility(show ? View.VISIBLE : View.GONE);
-        }
+        setSpinnerVisible(sceneSpinner, show);
         if (show && sceneCurrent != null) {
             sceneCurrent.setText("切换中…");
         }
@@ -1326,10 +1576,11 @@ public final class MainActivity extends Activity {
         TextView chip = text(label, 10, MUTED, Typeface.BOLD);
         chip.setGravity(Gravity.CENTER);
         chip.setPadding(dp(11), dp(7), dp(11), dp(7));
-        chip.setBackground(bg(ROW, 18));
+        chip.setBackground(statefulBackground(chip, ROW, 18));
         chip.setClickable(true);
         chip.setFocusable(true);
         chip.setOnClickListener(v -> sendCommand(cmd, new byte[0]));
+        installPressFeedback(chip);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, 0, dp(7), 0);
